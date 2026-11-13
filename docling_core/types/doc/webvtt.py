@@ -560,7 +560,7 @@ class WebVTTCueBlock(BaseModel):
         Returns:
             The parsed WebVTT cue block.
         """
-        lines = raw.strip().splitlines()
+        lines = raw.strip("\n").splitlines()
         if not lines:
             raise ValueError("Cue block must have at least one line")
         identifier: WebVTTCueIdentifier | None = None
@@ -578,7 +578,7 @@ class WebVTTCueBlock(BaseModel):
         start, end = [t.strip() for t in timing_line.split("-->")]
         end = re.split(" |\t", end)[0]  # ignore the cue settings list
         timings: WebVTTCueTimings = WebVTTCueTimings(start=WebVTTTimestamp(raw=start), end=WebVTTTimestamp(raw=end))
-        cue_text = "\n".join(cue_lines).strip()
+        cue_text = "\n".join(cue_lines)
 
         # Strip cue timestamp tags (e.g. <00:00:01.500>) — they carry no text content.
         cue_text = cls._pattern_cue_timestamp.sub("", cue_text)
@@ -678,7 +678,7 @@ class WebVTTCueBlock(BaseModel):
 class WebVTTFile(BaseModel):
     """A model representing a WebVTT file."""
 
-    _pattern: ClassVar[re.Pattern] = re.compile(r"(?m)^(STYLE|NOTE|REGION)\b[\s\S]*?(?:\n\s*\n|\Z)")
+    _pattern: ClassVar[re.Pattern] = re.compile(r"(?m)^(STYLE|NOTE|REGION)\b[\s\S]*?(?:\n\n|\Z)")
     cue_blocks: list[WebVTTCueBlock]
     title: str | None = None
 
@@ -721,6 +721,11 @@ class WebVTTFile(BaseModel):
     def parse(cls, raw: str) -> Self:
         """Parse a WebVTT file.
 
+        Blocks end at an empty line. A line holding only whitespace is cue text. The lines
+        after "WEBVTT" up to the first empty line, like the "Kind: captions" and "Language: en"
+        lines of YouTube captions, are a header that is ignored. NOTE, STYLE and REGION blocks
+        are ignored too. The cue text is kept as written.
+
         Args:
             raw: The raw WebVTT file content.
 
@@ -739,11 +744,17 @@ class WebVTTFile(BaseModel):
         title = lines[0].removeprefix("WEBVTT").strip() or None
         body = lines[1] if len(lines) > 1 else ""
 
+        # Skip the header, unless it is a cue that follows "WEBVTT" without an empty line
+        if body and not body.startswith("\n"):
+            header, _, rest = body.partition("\n\n")
+            if "-->" not in header:
+                body = rest
+
         # Remove NOTE/STYLE/REGION blocks
         body = re.sub(cls._pattern, "", body)
 
         # Split into cue blocks
-        raw_blocks = cls._split_blocks(body.strip())
+        raw_blocks = cls._split_blocks(body.strip("\n"))
         cues: list[WebVTTCueBlock] = []
         for block in raw_blocks:
             if not block.strip():
@@ -761,13 +772,17 @@ class WebVTTFile(BaseModel):
 
         A line holding only whitespace is cue text, like the " " line that starts every
         cue of a YouTube caption file. It still separates two cues when the next cue
-        starts right after it: its timings are on the next line, or on the one after an
-        identifier.
+        starts right after it: its timings are on the next line, or on the one after a
+        non-empty identifier line.
         """
         lines = body.split("\n")
         blocks: list[list[str]] = [[]]
         for index, line in enumerate(lines):
-            if not line or (not line.strip() and any("-->" in following for following in lines[index + 1 : index + 3])):
+            next_lines = lines[index + 1 : index + 3]
+            starts_cue = any("-->" in next_line for next_line in next_lines[:1]) or (
+                len(next_lines) > 1 and bool(next_lines[0]) and "-->" in next_lines[1]
+            )
+            if not line or (not line.strip() and starts_cue):
                 blocks.append([])
             else:
                 blocks[-1].append(line)
